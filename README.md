@@ -1,11 +1,5 @@
-# Jarvis — Face Recognition Core
-
-Phase 1 of a longer-term project: a face recognition engine as a plain
-Python package, driven by a CLI. No web server, no database, no browser —
-just detect → align → embed → match, so accuracy can be evaluated against
-real images before anything gets wrapped in a web app.
-
-See `docs` in the plan history for full rationale. Quick reference:
+# Jarvis
+Central facial recognition system for apartment profile tracking
 
 ## Setup
 
