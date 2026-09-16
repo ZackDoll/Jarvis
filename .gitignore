@@ -1,0 +1,10 @@
+# Biometric data — embeddings and face crops. Never commit.
+data/
+photos/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
