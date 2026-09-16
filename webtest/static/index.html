@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Jarvis Face Recognition — Test Harness</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+    max-width: 720px;
+    margin: 24px auto;
+    padding: 0 16px;
+    background: #111;
+    color: #eee;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 2px; }
+  .sub { color: #999; font-size: 0.85rem; margin-bottom: 20px; }
+  .card {
+    background: #1b1b1b;
+    border: 1px solid #333;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  video, canvas { border-radius: 8px; background: #000; }
+  video { width: 100%; max-width: 480px; display: block; }
+  canvas#capture { display: none; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  input[type=text] {
+    background: #222; color: #eee; border: 1px solid #444; border-radius: 6px;
+    padding: 8px 10px; font-size: 0.95rem; flex: 1; min-width: 140px;
+  }
+  button {
+    background: #2d6cdf; color: white; border: none; border-radius: 6px;
+    padding: 8px 14px; font-size: 0.9rem; cursor: pointer;
+  }
+  button:hover { background: #1e56bd; }
+  button.secondary { background: #444; }
+  button.secondary:hover { background: #555; }
+  button.danger { background: #a33; }
+  button.danger:hover { background: #822; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { margin-top: 10px; padding: 10px; border-radius: 6px; font-size: 0.9rem; white-space: pre-wrap; }
+  .status.ok { background: #143d1f; border: 1px solid #2a6b3a; }
+  .status.bad { background: #4a1f1f; border: 1px solid #7a3232; }
+  .status.info { background: #22314a; border: 1px solid #3a4f7a; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #333; }
+  .muted { color: #888; font-size: 0.8rem; }
+  label { font-size: 0.85rem; color: #bbb; display: block; margin-bottom: 4px; }
+  .live-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #bbb; }
+</style>
+</head>
+<body>
+
+<h1>Face Recognition — Test Harness</h1>
+<div class="sub">Phase 1 test UI. No auth, no profiles — just enroll/recognize against <code>face/</code> directly.</div>
+
+<div class="card">
+  <label>Camera</label>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="capture"></canvas>
+  <div class="row">
+    <button id="startCam">Start camera</button>
+    <span id="camStatus" class="muted"></span>
+  </div>
+</div>
+
+<div class="card">
+  <label>Enroll</label>
+  <div class="row">
+    <input type="text" id="enrollName" placeholder="Name (e.g. Zack)" />
+    <button id="enrollBtn" disabled>Capture &amp; Enroll</button>
+  </div>
+  <div id="enrollStatus" class="status" style="display:none"></div>
+</div>
+
+<div class="card">
+  <label>Recognize</label>
+  <div class="row">
+    <button id="recognizeBtn" disabled>Capture &amp; Recognize</button>
+    <label class="live-toggle">
+      <input type="checkbox" id="liveToggle" />
+      Live (every 1s)
+    </label>
+  </div>
+  <div id="recognizeStatus" class="status" style="display:none"></div>
+</div>
+
+<div class="card">
+  <label>Enrolled identities</label>
+  <div id="identitiesTable"><span class="muted">Loading…</span></div>
+  <div class="row"><button class="secondary" id="refreshBtn">Refresh</button></div>
+</div>
+
+<div class="card">
+  <label>Server</label>
+  <div id="healthStatus" class="muted">Loading…</div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const captureCanvas = document.getElementById('capture');
+const camStatus = document.getElementById('camStatus');
+const enrollBtn = document.getElementById('enrollBtn');
+const recognizeBtn = document.getElementById('recognizeBtn');
+const enrollStatus = document.getElementById('enrollStatus');
+const recognizeStatus = document.getElementById('recognizeStatus');
+const liveToggle = document.getElementById('liveToggle');
+let liveTimer = null;
+
+function setStatus(el, kind, text) {
+  el.style.display = 'block';
+  el.className = 'status ' + kind;
+  el.textContent = text;
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: 'user' },
+      audio: false,
+    });
+    video.srcObject = stream;
+    camStatus.textContent = 'Camera running.';
+    enrollBtn.disabled = false;
+    recognizeBtn.disabled = false;
+  } catch (err) {
+    camStatus.textContent = 'Camera error: ' + err.message +
+      ' (note: camera requires https:// or http://localhost, not a plain LAN IP)';
+  }
+}
+document.getElementById('startCam').addEventListener('click', startCamera);
+
+function captureBlob() {
+  return new Promise((resolve) => {
+    captureCanvas.width = video.videoWidth;
+    captureCanvas.height = video.videoHeight;
+    captureCanvas.getContext('2d').drawImage(video, 0, 0);
+    captureCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.9);
+  });
+}
+
+function fmtMetrics(m) {
+  if (!m) return '';
+  return Object.entries(m)
+    .map(([k, v]) => `${k}=${typeof v === 'number' ? v.toFixed(3) : v}`)
+    .join('  ');
+}
+
+async function doEnroll() {
+  const name = document.getElementById('enrollName').value.trim();
+  if (!name) {
+    setStatus(enrollStatus, 'bad', 'Enter a name first.');
+    return;
+  }
+  const blob = await captureBlob();
+  const form = new FormData();
+  form.append('name', name);
+  form.append('image', blob, 'frame.jpg');
+
+  enrollBtn.disabled = true;
+  try {
+    const res = await fetch('/api/enroll', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.ok) {
+      let msg = `Accepted. Total samples for "${name}": ${data.total_samples}`;
+      if (data.warn_low_samples) msg += `\n(Fewer than 5 samples — enroll more angles/lighting for better accuracy.)`;
+      msg += `\n${fmtMetrics(data.metrics)}`;
+      setStatus(enrollStatus, 'ok', msg);
+    } else {
+      setStatus(enrollStatus, 'bad', `Rejected: ${data.reason}\n${fmtMetrics(data.metrics)}`);
+    }
+    refreshIdentities();
+  } catch (err) {
+    setStatus(enrollStatus, 'bad', 'Request failed: ' + err.message);
+  } finally {
+    enrollBtn.disabled = false;
+  }
+}
+enrollBtn.addEventListener('click', doEnroll);
+
+async function doRecognize() {
+  const blob = await captureBlob();
+  const form = new FormData();
+  form.append('image', blob, 'frame.jpg');
+
+  try {
+    const res = await fetch('/api/recognize', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.decision === 'match') {
+      setStatus(recognizeStatus, 'ok',
+        `MATCH: ${data.best.name}  (score=${data.best.score.toFixed(4)}, margin=${data.margin.toFixed(4)})\n` +
+        `Top: ${data.top.map(c => `${c.name}=${c.score.toFixed(3)}`).join(', ')}`);
+    } else if (data.decision === 'no_match') {
+      setStatus(recognizeStatus, 'info',
+        `NO MATCH\nTop: ${data.top.map(c => `${c.name}=${c.score.toFixed(3)}`).join(', ') || '(store is empty)'}`);
+    } else if (data.decision === 'empty_store') {
+      setStatus(recognizeStatus, 'info', 'No identities enrolled yet.');
+    } else {
+      setStatus(recognizeStatus, 'bad', `${data.decision}: ${data.reason || ''}\n${fmtMetrics(data.metrics)}`);
+    }
+  } catch (err) {
+    setStatus(recognizeStatus, 'bad', 'Request failed: ' + err.message);
+  }
+}
+recognizeBtn.addEventListener('click', doRecognize);
+
+liveToggle.addEventListener('change', () => {
+  if (liveToggle.checked) {
+    liveTimer = setInterval(doRecognize, 1000);
+  } else {
+    clearInterval(liveTimer);
+    liveTimer = null;
+  }
+});
+
+async function refreshIdentities() {
+  const container = document.getElementById('identitiesTable');
+  try {
+    const res = await fetch('/api/identities');
+    const data = await res.json();
+    if (!data.identities.length) {
+      container.innerHTML = '<span class="muted">No identities enrolled yet.</span>';
+      return;
+    }
+    let html = '<table><tr><th>Name</th><th>Samples</th><th></th></tr>';
+    for (const id of data.identities) {
+      html += `<tr><td>${id.name}</td><td>${id.samples}</td>` +
+        `<td><button class="danger" onclick="removeIdentity('${id.name}')">Remove</button></td></tr>`;
+    }
+    html += '</table>';
+    container.innerHTML = html;
+  } catch (err) {
+    container.innerHTML = '<span class="muted">Failed to load: ' + err.message + '</span>';
+  }
+}
+
+async function removeIdentity(name) {
+  await fetch('/api/identities/' + encodeURIComponent(name), { method: 'DELETE' });
+  refreshIdentities();
+}
+window.removeIdentity = removeIdentity;
+
+document.getElementById('refreshBtn').addEventListener('click', refreshIdentities);
+
+async function loadHealth() {
+  const el = document.getElementById('healthStatus');
+  try {
+    const res = await fetch('/api/health');
+    const data = await res.json();
+    el.textContent = `Model: ${data.model_name} v${data.model_version}  |  ` +
+      `threshold=${data.threshold}  margin_min=${data.margin_min}  |  ` +
+      `${data.identities} identities, ${data.samples} samples`;
+  } catch (err) {
+    el.textContent = 'Could not reach server: ' + err.message;
+  }
+}
+
+refreshIdentities();
+loadHealth();
+</script>
+</body>
+</html>
